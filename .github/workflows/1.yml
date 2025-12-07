@@ -27,14 +27,19 @@ jobs:
 
       # 步骤 3: 抓取 RSS 源、生成 HTML 并更新索引
       - name: Fetch RSS, generate HTML, and update index
+        id: generate_news # 给这个步骤一个id，方便后续引用其输出
         run: |
           # --- A. 定义变量 ---
-          TODAY=$(date +%Y-%m-%d) # 使用当天日期命名，因为RSS通常包含当天最新内容
+          # 使用当天日期命名，因为RSS通常包含当天最新内容
+          TODAY=$(date +%Y-%m-%d)
           YEAR=$(date +%Y)
           MONTH=$(date +%m)
           NEWS_DIR="${YEAR}/${MONTH}"
           NEWS_FILE="${NEWS_DIR}/${TODAY}.html"
           INDEX_FILE="index.html"
+
+          # 将日期输出，以便后续步骤可以使用
+          echo "commit_date=${TODAY}" >> $GITHUB_OUTPUT
 
           echo "开始为日期 ${TODAY} 生成新闻报告..."
           echo "文件将保存在: ${NEWS_FILE}"
@@ -77,12 +82,6 @@ jobs:
             <h1>${TODAY} 科技新闻摘要</h1>" > $NEWS_FILE
 
           # 使用 xmlstarlet 解析 XML 并生成新闻条目
-          # xmlstarlet sel -t -m "//item" ... 表示对每个 <item> 标签执行操作
-          # -v "title" 获取 <title> 的值
-          # -v "link" 获取 <link> 的值
-          # -v "pubDate" 获取 <pubDate> 的值
-          # -v "description" 获取 <description> 的值
-          # -n 换行
           xmlstarlet sel -t -m "//item" -v "title" -n -v "link" -n -v "pubDate" -n -v "description" -n -n news.xml | while read -r title; read -r link; read -r pubDate; read -r description; do
             # 清理 description 中的 HTML 标签和多余内容
             clean_desc=$(echo "$description" | sed -e 's/<[^>]*>//g' | awk '{$1=$1};1')
@@ -120,6 +119,8 @@ jobs:
       - name: Commit and push if changes exist
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "docs(news): 自动更新 ${TODAY} 的新闻"
-          file_pattern: "*.html" # 只提交 HTML 文件的变动
+          # 使用上一步输出的日期来构造提交信息
+          commit_message: "docs(news): 自动更新 ${{ steps.generate_news.outputs.commit_date }} 的新闻"
+          # 指定只追踪所有 HTML 文件的变动
+          file_pattern: "**/*.html"
 
