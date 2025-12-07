@@ -1,40 +1,217 @@
-name: 每日新闻抓取
-
+name: 每日新闻爬取与自动部署
 on:
+  # 每日0:00 UTC+8执行（北京时间）
   schedule:
-    - cron: '0 0 * * *'  # UTC 0:00
+    - cron: '0 16 * * *'  # UTC 16:00 = 北京时间 00:00
+  # 允许手动触发（方便测试）
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  scrape-and-deploy:
+  news-crawler:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write  # 授予推送代码到GitHub仓库的权限
+
     steps:
-      - name: 检出代码
+      # 1. 拉取仓库代码
+      - name: 拉取代码
         uses: actions/checkout@v4
+        with:
+          ref: main
 
+      # 2. 安装Python环境（用于爬虫和HTML生成）
+      - name: 配置Python环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. 安装必要的依赖包
       - name: 安装依赖
-        run: pip install requests beautifulsoup4 lxml
-
-      - name: 爬取新闻并生成HTML
         run: |
-          python - << 'EOF'
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 python-dotenv
+
+      # 4. 执行新闻爬取和HTML生成
+      - name: 爬取昨日新闻并生成HTML
+        run: |
+          # 计算昨日日期（格式：YYYYMMDD）
+          YESTERDAY=$(date -d "yesterday" +%Y%m%d)
+          YEAR=$(date -d "yesterday" +%Y)
+          MONTH=$(date -d "yesterday" +%m)
+
+          # 定义文件路径（按年/月/日结构）
+          NEWS_DIR="news/$YEAR/$MONTH"
+          NEWS_FILE="$NEWS_DIR/$YESTERDAY.html"
+          INDEX_FILE="index.html"
+
+          # 创建按年/月的目录结构（-p参数自动创建多级目录）
+          mkdir -p "$NEWS_DIR"
+
+          # 执行新闻爬取（模拟从多个来源获取新闻）
+          python -c "
           import requests
           from bs4 import BeautifulSoup
-          from datetime import datetime, timezone
-          import os, sys, re, json
+          import json
 
-          # ===== 配置 =====
-          now = datetime.now(timezone.utc)
-          year, month, date_str = now.strftime('%Y'), now.strftime('%m'), now.strftime('%Y-%m-%d')
-          os.makedirs(f'news/{year}/{month}', exist_ok=True)
+          # 模拟从多个新闻来源获取昨日新闻
+          def get_yesterday_news():
+              news_sources = [
+                  {
+                      'name': '新浪新闻',
+                      'url': 'https://news.sina.com.cn/'
+                  },
+                  {
+                      'name': '腾讯新闻',
+                      'url': 'https://news.qq.com/'
+                  },
+                  {
+                      'name': '网易新闻',
+                      'url': 'https://news.163.com/'
+                  }
+              ]
 
-          # ===== 请求页面 =====
-          url = 'https://tophub.today/c/news'
-          headers = {
+              all_news = []
+
+              for source in news_sources:
+                  try:
+                      # 发送HTTP请求获取页面内容
+                      response = requests.get(source['url'], timeout=10)
+                      response.encoding = 'utf-8'
+                      soup = BeautifulSoup(response.text, 'html.parser')
+
+                      # 模拟解析新闻内容（需要根据实际网站结构调整）
+                      # 这里简单提取标题和链接
+                      news_items = soup.find_all('a', class_='news-item')[:5]  # 取前5条新闻
+
+                      for item in news_items:
+                          news = {
+                              'source': source['name'],
+                              'title': item.get_text(strip=True),
+                              'link': item['href']
+                          }
+                          all_news.append(news)
+
+                  except Exception as e:
+                      print(f"从{source['name']}获取新闻失败: {e}")
+
+              return all_news
+
+          # 获取昨日新闻
+          news_data = get_yesterday_news()
+
+          # 生成HTML内容
+          html_content = f\"\"\"<!DOCTYPE html>
+          <html lang="zh-CN">
+          <head>
+              <meta charset="UTF-8">
+              <title>{YESTERDAY} 新闻汇总</title>
+              <style>
+                  body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                  .news-item {{ margin-bottom: 20px; padding: 10px; border: 1px solid #eee; }}
+                  .source {{ color: #666; font-size: 0.9em; }}
+                  .title {{ font-size: 1.2em; font-weight: bold; }}
+              </style>
+          </head>
+          <body>
+              <h1>{YESTERDAY} 新闻汇总</h1>
+          \"\"\"
+
+          # 添加新闻列表
+          for i, news in enumerate(news_data, 1):
+              html_content += f\"\"\"
+              <div class="news-item">
+                  <div class="source">来源: {news['source']}</div>
+                  <div class="title"><a href="{news['link']}">{i}. {news['title']}</a></div>
+              </div>
+              \"\"\"
+
+          html_content += \"</body></html>\"
+
+          # 写入新闻HTML文件
+          with open('$NEWS_FILE', 'w', encoding='utf-8') as f:
+              f.write(html_content)
+
+          print(f"已生成新闻文件: {NEWS_FILE}")
+          print(f"共获取 {len(news_data)} 条新闻")
+          "
+
+      # 5. 更新或创建index.html文件
+      - name: 更新或创建主页index.html
+        run: |
+          # 计算昨日日期（格式：YYYY年MM月DD日）
+          YESTERDAY_FULL=$(date -d "yesterday" +%Y年%m月%d日)
+          YEAR=$(date -d "yesterday" +%Y)
+          MONTH=$(date -d "yesterday" +%m)
+          DAY=$(date -d "yesterday" +%d)
+
+          # 定义文件路径
+          NEWS_DIR="news/$YEAR/$MONTH"
+          NEWS_FILE="$NEWS_DIR/$(date -d "yesterday" +%Y%m%d).html"
+          INDEX_FILE="index.html"
+
+          # 创建主页内容
+          INDEX_CONTENT="<!DOCTYPE html>
+          <html lang="zh-CN">
+          <head>
+              <meta charset="UTF-8">
+              <title>每日新闻汇总</title>
+              <style>
+                  body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                  .news-link {{ margin-bottom: 10px; }}
+                  h1 {{ color: #333; }}
+              </style>
+          </head>
+          <body>
+              <h1>每日新闻汇总</h1>
+          "
+
+          # 添加新闻链接（倒序排列，最新在顶部）
+          INDEX_CONTENT+="<ul>"
+
+          # 查找所有新闻文件并生成链接
+          find news/ -type f -name "*.html" | sort -r | while read -r file; do
+              # 提取日期信息
+              date_str=$(basename "$file" .html)
+              year=${date_str:0:4}
+              month=${date_str:4:2}
+              day=${date_str:6:2}
+              friendly_date="${year}年${month}月${day}日"
+              
+              # 计算相对路径
+              relative_path=$(realpath --relative-to=. "$file")
+              
+              # 添加链接
+              INDEX_CONTENT+="    <li class=\"news-link\"><a href=\"$relative_path\">$friendly_date 新闻</a></li>\n"
+          done
+
+          INDEX_CONTENT+="</ul></body></html>"
+
+          # 写入主页文件
+          echo "$INDEX_CONTENT" > "$INDEX_FILE"
+
+          echo "已更新或创建主页文件: $INDEX_FILE"
+
+      # 6. 提交并推送更新到main分支
+      - name: 提交并推送更新
+        run: |
+          # 配置Git用户信息
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action Bot"
+
+          # 添加所有变更文件
+          git add .
+
+          # 检查是否有文件变更
+          if git diff --quiet --cached; then
+              echo "没有需要提交的变更"
+          else
+              # 提交变更
+              git commit -m "自动更新：$(date -d "yesterday" +%Y年%m月%d日) 新闻汇总"
+              
+              # 推送变更到main分支
+              git push origin main
+              echo "已成功推送更新到main分支"
+          fi          headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
               'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
