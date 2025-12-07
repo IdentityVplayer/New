@@ -2,8 +2,7 @@ name: 每日新闻抓取
 
 on:
   schedule:
-    # 北京时间8:00（UTC 0:00）
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'  # UTC 0:00
   workflow_dispatch:
 
 permissions:
@@ -16,18 +15,9 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 设置 Python 环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+        run: pip install requests beautifulsoup4 lxml
 
       - name: 爬取新闻并生成HTML
         run: |
@@ -35,64 +25,53 @@ jobs:
           import requests
           from bs4 import BeautifulSoup
           from datetime import datetime
-          import os
-          import sys
-          import time
+          import os, sys, re
 
-          # 获取当前日期
           now = datetime.now()
-          year = now.strftime('%Y')
-          month = now.strftime('%m')
-          date_str = now.strftime('%Y-%m-%d')
-
-          # 创建目录
+          year, month, date_str = now.strftime('%Y'), now.strftime('%m'), now.strftime('%Y-%m-%d')
           os.makedirs(f'news/{year}/{month}', exist_ok=True)
 
-          # 爬取数据
+          # ===== 爬取页面 =====
           url = 'https://tophub.today/c/news'
           headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-              'Referer': 'https://tophub.today/'
+              'Accept-Language': 'zh-CN,zh;q=0.9'
           }
           
           try:
-              print(f'🌐 正在抓取: {url}')
+              print(f'🌐 正在请求: {url}')
               response = requests.get(url, headers=headers, timeout=30)
               response.raise_for_status()
-              response.encoding = 'utf-8'
+              html_content = response.text
               
-              soup = BeautifulSoup(response.text, 'html.parser')
+              # 保存原始HTML用于调试
+              debug_html = f'news/{year}/{month}/{date_str}_raw.html'
+              with open(debug_html, 'w', encoding='utf-8') as f:
+                  f.write(html_content)
+              print(f'💾 原始HTML已保存到: {debug_html}')
               
-              # 查找新闻列表 - 使用正确的选择器
+          except Exception as e:
+              print(f'❌ 请求失败: {str(e)}')
+              sys.exit(1)
+
+          # ===== 解析页面 =====
+          try:
+              soup = BeautifulSoup(html_content, 'html.parser')
               news_list = []
               
-              # 尝试多个可能的选择器
-              selectors = [
-                  '.jc table tr',      # 基于掘金文章的正确选择器
-                  '.cc-cd-tb tr',      # 备选选择器
-                  'table tbody tr'     # 通用选择器
-              ]
-              
-              rows = []
-              for selector in selectors:
-                  rows = soup.select(selector)
-                  if rows:
-                      print(f'✅ 找到 {len(rows)} 行数据 (选择器: {selector})')
-                      break
+              # 策略1: 查找所有表格行
+              rows = soup.find_all('tr')
+              print(f'📊 找到 {len(rows)} 个表格行')
               
               if not rows:
-                  print('❌ 找不到新闻列表，打印页面结构:')
-                  # 打印页面结构帮助调试
-                  tables = soup.find_all('table')
-                  print(f'发现 {len(tables)} 个表格')
-                  for i, table in enumerate(tables):
-                      print(f'表格 {i}: class={table.get("class", "无")}')
+                  print('❌ 未找到任何表格行')
+                  # 打印页面结构帮助诊断
+                  print('页面结构预览:')
+                  print(soup.prettify()[:2000])
                   sys.exit(1)
               
-              # 解析数据（跳过表头）
-              for idx, row in enumerate(rows[1:], start=1):
+              # 解析每一行
+              for idx, row in enumerate(rows):
                   cols = row.find_all('td')
                   if len(cols) >= 3:
                       try:
@@ -101,32 +80,40 @@ jobs:
                           if title_elem:
                               title = title_elem.get_text(strip=True)
                               link = title_elem.get('href', '')
-                              
                               if link and not link.startswith('http'):
                                   link = 'https://tophub.today' + link
-                                  
+                              
                               heat = cols[2].text.strip()
                               
-                              # 确保标题不为空
-                              if title:
+                              if title and len(title) > 2:  # 确保标题有效
                                   news_list.append({
-                                      'rank': rank or str(idx),
+                                      'rank': rank or str(len(news_list)+1),
                                       'title': title,
                                       'heat': heat,
                                       'link': link
                                   })
-                      except Exception as e:
-                          print(f'⚠️ 解析第 {idx} 行失败: {e}')
+                      except:
                           continue
               
               if not news_list:
-                  print('❌ 未能提取任何有效新闻')
+                  print('❌ 未提取到有效新闻数据')
+                  # 打印前几个行的结构
+                  print('前3行结构:')
+                  for i, row in enumerate(rows[:3]):
+                      print(f'行 {i}: {row}')
                   sys.exit(1)
               
               print(f'✅ 成功提取 {len(news_list)} 条新闻')
+              
+          except Exception as e:
+              print(f'❌ 解析失败: {str(e)}')
+              import traceback
+              traceback.print_exc()
+              sys.exit(1)
 
-              # 生成HTML
-              html_content = f'''<!DOCTYPE html>
+          # ===== 生成HTML =====
+          try:
+              html_output = f'''<!DOCTYPE html>
               <html lang="zh-CN">
               <head>
                   <meta charset="UTF-8">
@@ -163,177 +150,42 @@ jobs:
                           <tbody>'''
               
               for news in news_list:
-                  html_content += f'''
+                  html_output += f'''
                               <tr>
                                   <td class="rank">{news['rank']}</td>
                                   <td><a href="{news['link']}" target="_blank" rel="noopener noreferrer">{news['title']}</a></td>
                                   <td class="heat">{news['heat']}</td>
                               </tr>'''
               
-              html_content += f'''
+              html_output += f'''
                           </tbody>
                       </table>
-                      <p class="source">数据来源：tophub.today/c/news</p>
+                      <p class="source">数据来源：tophub.today/c/news | 更新时间：{now.strftime('%Y-%m-%d %H:%M:%S')}</p>
                   </div>
               </body>
               </html>
               '''
               
-              # 保存HTML文件
-              file_path = f'news/{year}/{month}/{date_str}.html'
-              with open(file_path, 'w', encoding='utf-8') as f:
-                  f.write(html_content)
+              # 保存HTML
+              output_file = f'news/{year}/{month}/{date_str}.html'
+              with open(output_file, 'w', encoding='utf-8') as f:
+                  f.write(html_output)
               
-              print(f'✅ HTML文件已生成: {file_path}')
+              print(f'✅ 新闻HTML已生成: {output_file}')
               
           except Exception as e:
-              print(f'❌ 爬取失败: {str(e)}')
-              import traceback
-              traceback.print_exc()
+              print(f'❌ 生成HTML失败: {str(e)}')
               sys.exit(1)
 
-      - name: 提交并推送更改
+      - name: 提交更改
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          DATE_STR=$(date +%Y-%m-%d)
-          
           if [[ -n $(git status -s) ]]; then
             git add news/
-            git commit -m "📰 添加 ${DATE_STR} 新闻" || echo "⚠️ 没有变更"
-            git push || echo "⚠️ 推送失败"
-          else
-            echo "⚠️ 没有新文件需要提交"
-          fi          from bs4 import BeautifulSoup
-          from datetime import datetime
-          import os
-          import sys
-
-          # 获取当前日期
-          now = datetime.now()
-          year = now.strftime('%Y')
-          month = now.strftime('%m')
-          date_str = now.strftime('%Y-%m-%d')
-
-          # 确保目录存在
-          os.makedirs(f'news/{year}/{month}', exist_ok=True)
-
-          # 爬取数据
-          url = 'https://tophub.today/c/news'
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
-          
-          try:
-              response = requests.get(url, headers=headers, timeout=30)
-              response.raise_for_status()
-              response.encoding = 'utf-8'
-              
-              soup = BeautifulSoup(response.text, 'html.parser')
-              
-              news_list = []
-              table = soup.find('table', class_='table')
-              if table:
-                  rows = table.find_all('tr')[1:]
-                  for row in rows:
-                      cols = row.find_all('td')
-                      if len(cols) >= 3:
-                          rank = cols[0].text.strip()
-                          title_elem = cols[1].find('a')
-                          if title_elem:
-                              title = title_elem.text.strip()
-                              link = title_elem.get('href', '')
-                              
-                              if link and not link.startswith('http'):
-                                  link = 'https://tophub.today' + link
-                                  
-                              heat = cols[2].text.strip()
-                              
-                              news_list.append({
-                                  'rank': rank,
-                                  'title': title,
-                                  'heat': heat,
-                                  'link': link
-                              })
-
-              # 生成HTML
-              html_content = f'''<!DOCTYPE html>
-              <html lang="zh-CN">
-              <head>
-                  <meta charset="UTF-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                  <title>今日新闻 - {date_str}</title>
-                  <style>
-                      body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-                      .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
-                      h1 {{ color: #2c3e50; text-align: center; margin-bottom: 10px; }}
-                      .date {{ text-align: center; color: #7f8c8d; margin-bottom: 30px; font-size: 1.1em; }}
-                      table {{ width: 100%; border-collapse: collapse; font-size: 1em; }}
-                      th, td {{ padding: 14px; text-align: left; border-bottom: 1px solid #ecf0f1; }}
-                      th {{ background-color: #f8f9fa; font-weight: 600; color: #2c3e50; }}
-                      tr:hover {{ background-color: #f8f9fa; }}
-                      a {{ color: #3498db; text-decoration: none; }}
-                      a:hover {{ color: #2980b9; text-decoration: underline; }}
-                      .heat {{ color: #e74c3c; font-weight: 600; }}
-                      .rank {{ color: #95a5a6; font-weight: 600; width: 80px; }}
-                  </style>
-              </head>
-              <body>
-                  <div class="container">
-                      <h1>📰 今日新闻热点</h1>
-                      <p class="date">{date_str}</p>
-                      <table>
-                          <thead>
-                              <tr>
-                                  <th>排名</th>
-                                  <th>标题</th>
-                                  <th>热度</th>
-                              </tr>
-                          </thead>
-                          <tbody>'''
-              
-              for news in news_list:
-                  html_content += f'''
-                              <tr>
-                                  <td class="rank">{news['rank']}</td>
-                                  <td><a href="{news['link']}" target="_blank" rel="noopener noreferrer">{news['title']}</a></td>
-                                  <td class="heat">{news['heat']}</td>
-                              </tr>'''
-              
-              html_content += '''
-                          </tbody>
-                      </table>
-                  </div>
-              </body>
-              </html>
-              '''
-              
-              # 保存HTML文件
-              file_path = f'news/{year}/{month}/{date_str}.html'
-              with open(file_path, 'w', encoding='utf-8') as f:
-                  f.write(html_content)
-              
-              print(f'✅ 新闻已保存到: {file_path}')
-              print(f'📊 共抓取 {len(news_list)} 条新闻')
-              
-          except Exception as e:
-              print(f'❌ 爬取失败: {str(e)}')
-              sys.exit(1)
-          EOF
-
-      - name: 提交并推送更改
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          DATE_STR=$(date +%Y-%m-%d)
-          
-          # 检查是否有新文件
-          if [[ -n $(git status -s) ]]; then
-            git add news/
-            git commit -m "📰 添加 ${DATE_STR} 新闻" || echo "⚠️ 没有变更"
-            git push || echo "⚠️ 推送失败，请检查分支权限"
+            git commit -m "📰 添加 $(date +%Y-%m-%d) 新闻"
+            git push
           else
             echo "⚠️ 没有新文件需要提交"
           fi
