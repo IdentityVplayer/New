@@ -1,39 +1,113 @@
 # .github/workflows/daily-news.yml
 
-name: Daily TopHub Scraper
+name: Daily TopHub Scraper (Fixed)
 
 on:
-  # 每日 0:00 UTC 执行 (对应北京时间早上8点)
-  # 如果需要北京时间0点执行，请改为 '16 * * * *'
   schedule:
-    - cron: '0 0 * * *'
-  # 允许在 GitHub Actions 页面手动触发此工作流
-  workflow_dispatch:
+    - cron: '0 0 * * *' # 每日0:00 UTC执行
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 授予工作流向仓库写入内容的权限
+      contents: write
 
     steps:
-      # 步骤 1: 检出您的代码仓库
+      # 步骤 1: 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 安装 pup (一个用于解析HTML的命令行工具)
+      # 步骤 2: 安装 pup (HTML解析工具)
       - name: Install pup
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-          # 从GitHub下载pup的二进制文件并安装
+          sudo apt-get update && sudo apt-get install -y unzip
           curl -L https://github.com/ericchiang/pup/releases/download/v0.4.0/pup_v0.4.0_linux_amd64.zip -o pup.zip
           unzip pup.zip
           sudo mv pup /usr/local/bin/
 
-      # 步骤 3: 爬取网页、生成HTML并更新索引
-      - name: Scrape website, generate HTML, and update index
+      # 步骤 3: 爬取、生成、更新
+      - name: Scrape, Generate, and Update
         id: generate_news
+        run: |
+          # --- A. 定义变量 ---
+          TODAY=$(date +%Y-%m-%d)
+          YEAR=$(date +%Y)
+          MONTH=$(date +%m)
+          NEWS_DIR="${YEAR}/${MONTH}"
+          NEWS_FILE="${NEWS_DIR}/${TODAY}.html"
+          INDEX_FILE="index.html"
+          echo "commit_date=${TODAY}" >> $GITHUB_OUTPUT
+
+          echo "开始为日期 ${TODAY} 爬取 tophub.today 热榜..."
+
+          # --- B. 爬取网页内容 (使用更强的反爬虫头部) ---
+          TARGET_URL="https://tophub.today/n/mproPpoq6O" # 知乎热榜
+          
+          # 模拟浏览器发送更完整的请求头
+          curl -s -L \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            -H "Referer: https://tophub.today/" \
+            "$TARGET_URL" -o tophub.html
+
+          # 增加调试步骤：打印下载的HTML文件大小和前几行，方便排错
+          echo "下载的 tophub.html 文件大小: $(wc -c < tophub.html) bytes"
+          echo "文件头部内容预览:"
+          head -n 20 tophub.html
+
+          if [ ! -s tophub.html ]; then
+            echo "错误：下载的网页为空。"
+            exit 1
+          fi
+
+          # --- C. 生成新闻 HTML 文件 (使用新的CSS选择器) ---
+          mkdir -p $NEWS_DIR
+
+          # 创建 HTML 文件头部
+          echo "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'><title>知乎热榜 - ${TODAY}</title><style>body{font-family:sans-serif;margin:2em}ol{padding-left:20px}li{margin-bottom:10px}a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}.metrics{font-size:0.9em;color:#57606a;margin-left:10px}</style></head><body><h1>知乎热榜 (${TODAY})</h1><ol>" > $NEWS_FILE
+
+          # 使用 pup 和新的CSS选择器解析HTML
+          # 选择器 'tbody > tr' 选中表格主体中的每一行
+          # 'td:nth-child(2) a' 提取第二列中的链接和标题
+          # 'td:nth-child(3)' 提取第三列中的热度值
+          pup 'tbody > tr' < tophub.html | while read -r item; do
+            # 从每一行(tr)中提取信息
+            LINK=$(echo "$item" | pup 'td:nth-child(2) a attr{href}')
+            TITLE=$(echo "$item" | pup 'td:nth-child(2) a text{}')
+            METRICS=$(echo "$item" | pup 'td:nth-child(3) text{}')
+
+            # 过滤掉空的或无效的行
+            if [ -n "$TITLE" ] && [ -n "$LINK" ]; then
+              # 拼接成完整的URL
+              FULL_LINK="https://tophub.today${LINK}"
+              echo "  <li><a href='${FULL_LINK}' target='_blank' rel='noopener noreferrer'>${TITLE}</a><span class='metrics'>${METRICS}</span></li>" >> $NEWS_FILE
+            fi
+          done
+
+          # 创建 HTML 文件尾部
+          echo "</ol></body></html>" >> $NEWS_FILE
+          echo "热榜文件 ${NEWS_FILE} 已生成。"
+
+          # --- D. 更新 index.html ---
+          if [ ! -f "$INDEX_FILE" ]; then
+            echo "<!DOCTYPE html><html lang='zh-CN'><head><title>热榜归档</title></head><body><h1>热榜归档</h1><ul></ul></body></html>" > $INDEX_FILE
+          fi
+          # 防止重复添加
+          if ! grep -q "${NEWS_FILE}" "$INDEX_FILE"; then
+            sed -i "/<ul>/a \ \ \ \ \ \ \ \ \ \ \ \ <li><a href='${NEWS_FILE}'>${TODAY} 的知乎热榜</a></li>" $INDEX_FILE
+            echo "${INDEX_FILE} 已更新。"
+          else
+            echo "${INDEX_FILE} 中已存在该条目，无需更新。"
+          fi
+
+      # 步骤 4: 提交并推送
+      - name: Commit and push if changes exist
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(tophub): 自动更新 ${{ steps.generate_news.outputs.commit_date }} 的知乎热榜"
+          file_pattern: "**/*.html"
         run: |
           # --- A. 定义变量 ---
           TODAY=$(date +%Y-%m-%d)
