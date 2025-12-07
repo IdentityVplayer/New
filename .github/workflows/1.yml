@@ -1,0 +1,125 @@
+# .github/workflows/daily-news.yml
+
+name: Daily News Integrator (RSS Version)
+
+on:
+  # 每日 0:00 UTC 执行 (对应北京时间早上8点)
+  # 如果需要北京时间0点执行，请改为 '16 * * * *'
+  schedule:
+    - cron: '0 0 * * *'
+  # 允许在 GitHub Actions 页面手动触发此工作流
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 授予工作流向仓库写入内容的权限
+
+    steps:
+      # 步骤 1: 检出您的代码仓库
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 步骤 2: 安装 xmlstarlet (一个用于处理 XML 文件的命令行工具)
+      - name: Install xmlstarlet
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      # 步骤 3: 抓取 RSS 源、生成 HTML 并更新索引
+      - name: Fetch RSS, generate HTML, and update index
+        run: |
+          # --- A. 定义变量 ---
+          TODAY=$(date +%Y-%m-%d) # 使用当天日期命名，因为RSS通常包含当天最新内容
+          YEAR=$(date +%Y)
+          MONTH=$(date +%m)
+          NEWS_DIR="${YEAR}/${MONTH}"
+          NEWS_FILE="${NEWS_DIR}/${TODAY}.html"
+          INDEX_FILE="index.html"
+
+          echo "开始为日期 ${TODAY} 生成新闻报告..."
+          echo "文件将保存在: ${NEWS_FILE}"
+
+          # --- B. 抓取 RSS 新闻源 ---
+          # 使用路透社中文网的科技新闻 RSS 源，这是一个公开且无需密钥的 XML 源。
+          # 您可以替换为其他任何有效的 RSS 地址。
+          RSS_URL="http://feeds.reuters.com/reuters/technologyNews?format=xml"
+          
+          # 使用 curl 下载 RSS 内容并保存到临时文件
+          curl -s "$RSS_URL" -o news.xml
+          
+          # 检查下载的文件是否为空
+          if [ ! -s news.xml ]; then
+            echo "错误：无法下载 RSS 源或源为空。"
+            exit 1
+          fi
+
+          # --- C. 生成新闻 HTML 文件 ---
+          # 创建文件夹 (如果不存在)
+          mkdir -p $NEWS_DIR
+
+          # 创建 HTML 文件头部
+          echo "<!DOCTYPE html>
+          <html lang='zh-CN'>
+          <head>
+            <meta charset='UTF-8'>
+            <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+            <title>科技新闻 - ${TODAY}</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 2em; line-height: 1.6; }
+              h1, h2 { color: #1f2328; }
+              a { color: #0969da; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .news-item { margin-bottom: 1.5em; border-bottom: 1px solid #d0d7de; padding-bottom: 1em; }
+              .pub-date { font-size: 0.9em; color: #57606a; }
+            </style>
+          </head>
+          <body>
+            <h1>${TODAY} 科技新闻摘要</h1>" > $NEWS_FILE
+
+          # 使用 xmlstarlet 解析 XML 并生成新闻条目
+          # xmlstarlet sel -t -m "//item" ... 表示对每个 <item> 标签执行操作
+          # -v "title" 获取 <title> 的值
+          # -v "link" 获取 <link> 的值
+          # -v "pubDate" 获取 <pubDate> 的值
+          # -v "description" 获取 <description> 的值
+          # -n 换行
+          xmlstarlet sel -t -m "//item" -v "title" -n -v "link" -n -v "pubDate" -n -v "description" -n -n news.xml | while read -r title; read -r link; read -r pubDate; read -r description; do
+            # 清理 description 中的 HTML 标签和多余内容
+            clean_desc=$(echo "$description" | sed -e 's/<[^>]*>//g' | awk '{$1=$1};1')
+            
+            echo "  <div class='news-item'>
+              <h2><a href='${link}' target='_blank' rel='noopener noreferrer'>${title}</a></h2>
+              <p class='pub-date'>发布于: ${pubDate}</p>
+              <p>${clean_desc}</p>
+            </div>" >> $NEWS_FILE
+          done
+
+          # 创建 HTML 文件尾部
+          echo "</body></html>" >> $NEWS_FILE
+          echo "新闻文件 ${NEWS_FILE} 已生成。"
+
+          # --- D. 更新 index.html ---
+          if [ ! -f "$INDEX_FILE" ]; then
+            echo "<!DOCTYPE html>
+            <html lang='zh-CN'>
+            <head><title>新闻归档</title><style>body { font-family: sans-serif; margin: 2em; }</style></head>
+            <body>
+              <h1>新闻归档</h1>
+              <ul>
+              </ul>
+            </body>
+            </html>" > $INDEX_FILE
+            echo "创建了新的 ${INDEX_FILE}。"
+          fi
+
+          # 在 index.html 的 <ul> 标签后添加指向新文件的链接
+          sed -i "/<ul>/a \ \ \ \ \ \ \ \ \ \ \ \ <li><a href='${NEWS_FILE}'>${TODAY} 的新闻</a></li>" $INDEX_FILE
+          echo "${INDEX_FILE} 已更新。"
+
+      # 步骤 4: 提交并推送到 main 分支
+      - name: Commit and push if changes exist
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(news): 自动更新 ${TODAY} 的新闻"
+          file_pattern: "*.html" # 只提交 HTML 文件的变动
+
