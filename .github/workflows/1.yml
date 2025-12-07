@@ -1,6 +1,6 @@
 # .github/workflows/daily-news.yml
 
-name: Daily TopHub Scraper (Fixed)
+name: Daily TopHub Scraper (Robust Version)
 
 on:
   schedule:
@@ -18,13 +18,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 步骤 2: 安装 pup (HTML解析工具)
-      - name: Install pup
+      # 步骤 2: 安装依赖 (pup for HTML, jq for JSON)
+      - name: Install dependencies (pup & jq)
         run: |
-          sudo apt-get update && sudo apt-get install -y unzip
+          sudo apt-get update
+          sudo apt-get install -y unzip jq # 同时安装 jq
           curl -L https://github.com/ericchiang/pup/releases/download/v0.4.0/pup_v0.4.0_linux_amd64.zip -o pup.zip
           unzip pup.zip
           sudo mv pup /usr/local/bin/
+          echo "pup and jq installed successfully."
 
       # 步骤 3: 爬取、生成、更新
       - name: Scrape, Generate, and Update
@@ -34,6 +36,70 @@ jobs:
           TODAY=$(date +%Y-%m-%d)
           YEAR=$(date +%Y)
           MONTH=$(date +%m)
+          NEWS_DIR="${YEAR}/${MONTH}"
+          NEWS_FILE="${NEWS_DIR}/${TODAY}.html"
+          INDEX_FILE="index.html"
+          echo "commit_date=${TODAY}" >> $GITHUB_OUTPUT
+
+          echo "开始为日期 ${TODAY} 爬取 tophub.today 热榜..."
+
+          # --- B. 爬取网页内容 ---
+          TARGET_URL="https://tophub.today/n/mproPpoq6O" # 知乎热榜
+          
+          # 模拟浏览器发送请求，并将HTTP状态码和内容分开处理
+          HTTP_STATUS=$(curl -s -L -w "%{http_code}" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
+            -o tophub.html \
+            "$TARGET_URL")
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "错误: 爬取失败，HTTP状态码: $HTTP_STATUS"
+            exit 1
+          fi
+          
+          if [ ! -s tophub.html ]; then
+            echo "错误: 网页内容为空，即使状态码是200。"
+            exit 1
+          fi
+          
+          echo "网页下载成功 (大小: $(wc -c < tophub.html) bytes)."
+
+          # --- C. 生成新闻 HTML 文件 (使用 pup + jq 的稳定方法) ---
+          mkdir -p $NEWS_DIR
+
+          # 创建 HTML 文件头部
+          echo "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'><title>知乎热榜 - ${TODAY}</title><style>body{font-family:sans-serif;margin:2em}ol{padding-left:20px}li{margin-bottom:10px}a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}.metrics{font-size:0.9em;color:#57606a;margin-left:10px}</style></head><body><h1>知乎热榜 (${TODAY})</h1><ol>" > $NEWS_FILE
+
+          # 使用 pup 将所有匹配项转为 JSON，然后用 jq 解析，这是最稳定的方法
+          # pup 'tbody > tr' -> 选择所有表格行
+          # json{} -> 将每个匹配的 tr 元素转换为 JSON 对象
+          # jq -r '.[] | ...' -> 对每个 JSON 对象进行处理
+          pup 'tbody > tr json{}' < tophub.html | jq -r '.[] | 
+            .children[1].children[0].href as $link | 
+            .children[1].children[0].text as $title | 
+            .children[2].text as $metrics | 
+            "  <li><a href=\"https://tophub.today\($link)\" target=\"_blank\" rel=\"noopener noreferrer\">\($title)</a><span class=\"metrics\">\($metrics)</span></li>"' >> $NEWS_FILE
+
+          # 创建 HTML 文件尾部
+          echo "</ol></body></html>" >> $NEWS_FILE
+          echo "热榜文件 ${NEWS_FILE} 已生成。"
+
+          # --- D. 更新 index.html ---
+          if [ ! -f "$INDEX_FILE" ]; then
+            echo "<!DOCTYPE html><html lang='zh-CN'><head><title>热榜归档</title></head><body><h1>热榜归档</h1><ul></ul></body></html>" > $INDEX_FILE
+          fi
+          if ! grep -q "${NEWS_FILE}" "$INDEX_FILE"; then
+            sed -i "/<ul>/a \ \ \ \ \ \ \ \ \ \ \ \ <li><a href='${NEWS_FILE}'>${TODAY} 的知乎热榜</a></li>" "$INDEX_FILE"
+            echo "${INDEX_FILE} 已更新。"
+          fi
+
+      # 步骤 4: 提交并推送
+      - name: Commit and push if changes exist
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(tophub): 自动更新 ${{ steps.generate_news.outputs.commit_date }} 的知乎热榜"
+          file_pattern: "**/*.html"
           NEWS_DIR="${YEAR}/${MONTH}"
           NEWS_FILE="${NEWS_DIR}/${TODAY}.html"
           INDEX_FILE="index.html"
