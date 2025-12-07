@@ -24,86 +24,116 @@ jobs:
           python - << 'EOF'
           import requests
           from bs4 import BeautifulSoup
-          from datetime import datetime
-          import os, sys, re
+          from datetime import datetime, timezone
+          import os, sys, re, json
 
-          now = datetime.now()
+          # ===== 配置 =====
+          now = datetime.now(timezone.utc)
           year, month, date_str = now.strftime('%Y'), now.strftime('%m'), now.strftime('%Y-%m-%d')
           os.makedirs(f'news/{year}/{month}', exist_ok=True)
 
-          # ===== 爬取页面 =====
+          # ===== 请求页面 =====
           url = 'https://tophub.today/c/news'
           headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept-Language': 'zh-CN,zh;q=0.9'
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+              'Referer': 'https://tophub.today/',
           }
           
           try:
               print(f'🌐 正在请求: {url}')
+              print(f'📋 请求头: {json.dumps(headers, indent=2)}')
               response = requests.get(url, headers=headers, timeout=30)
               response.raise_for_status()
+              
+              # 检查响应状态
+              print(f'✅ HTTP状态码: {response.status_code}')
+              print(f'📄 内容长度: {len(response.text)} 字符')
+              print(f'🔤 编码: {response.encoding}')
+              
               html_content = response.text
               
-              # 保存原始HTML用于调试
-              debug_html = f'news/{year}/{month}/{date_str}_raw.html'
-              with open(debug_html, 'w', encoding='utf-8') as f:
+              # 保存原始HTML
+              debug_file = f'news/{year}/{month}/{date_str}_debug.html'
+              with open(debug_file, 'w', encoding='utf-8') as f:
                   f.write(html_content)
-              print(f'💾 原始HTML已保存到: {debug_html}')
+              print(f'💾 调试文件已保存: {debug_file}')
               
           except Exception as e:
               print(f'❌ 请求失败: {str(e)}')
+              print(f'错误类型: {type(e).__name__}')
               sys.exit(1)
 
           # ===== 解析页面 =====
           try:
               soup = BeautifulSoup(html_content, 'html.parser')
-              news_list = []
+              print(f'🧪 开始解析HTML...')
               
-              # 策略1: 查找所有表格行
-              rows = soup.find_all('tr')
-              print(f'📊 找到 {len(rows)} 个表格行')
+              # 方法1: 查找所有表格
+              tables = soup.find_all('table')
+              print(f'📊 找到 {len(tables)} 个表格')
               
-              if not rows:
-                  print('❌ 未找到任何表格行')
-                  # 打印页面结构帮助诊断
-                  print('页面结构预览:')
-                  print(soup.prettify()[:2000])
+              if not tables:
+                  print('❌ 未找到任何表格')
+                  # 打印页面重要元素
+                  print('页面重要元素预览:')
+                  for tag in ['div', 'section', 'main']:
+                      elements = soup.find_all(tag)
+                      if elements:
+                          print(f'- 找到 {len(elements)} 个 <{tag}> 标签')
                   sys.exit(1)
               
-              # 解析每一行
-              for idx, row in enumerate(rows):
-                  cols = row.find_all('td')
-                  if len(cols) >= 3:
-                      try:
-                          rank = cols[0].text.strip()
-                          title_elem = cols[1].find('a')
-                          if title_elem:
-                              title = title_elem.get_text(strip=True)
-                              link = title_elem.get('href', '')
-                              if link and not link.startswith('http'):
-                                  link = 'https://tophub.today' + link
+              # 遍历所有表格查找新闻
+              news_list = []
+              for table_idx, table in enumerate(tables):
+                  rows = table.find_all('tr')
+                  print(f'📋 表格 {table_idx}: 找到 {len(rows)} 行')
+                  
+                  for row_idx, row in enumerate(rows):
+                      cols = row.find_all('td')
+                      if len(cols) >= 3:
+                          try:
+                              # 提取信息
+                              rank = cols[0].text.strip()
+                              title_elem = cols[1].find('a')
                               
-                              heat = cols[2].text.strip()
-                              
-                              if title and len(title) > 2:  # 确保标题有效
-                                  news_list.append({
-                                      'rank': rank or str(len(news_list)+1),
-                                      'title': title,
-                                      'heat': heat,
-                                      'link': link
-                                  })
-                      except:
-                          continue
+                              if title_elem:
+                                  title = title_elem.get_text(strip=True)
+                                  link = title_elem.get('href', '')
+                                  
+                                  # 处理相对链接
+                                  if link and link.startswith('/'):
+                                      link = 'https://tophub.today' + link
+                                  elif link and not link.startswith('http'):
+                                      link = 'https://tophub.today/' + link
+                                  
+                                  heat = cols[2].text.strip()
+                                  
+                                  # 验证数据有效性
+                                  if title and len(title) > 1 and heat:
+                                      news_list.append({
+                                          'rank': rank or str(len(news_list)+1),
+                                          'title': title,
+                                          'heat': heat,
+                                          'link': link,
+                                          'table': table_idx,
+                                          'row': row_idx
+                                      })
+                                      print(f'✅ 找到新闻: [{rank}] {title[:30]}... | {heat}')
+                                  
+                          except Exception as e:
+                              print(f'⚠️  解析行失败 (表格{table_idx}, 行{row_idx}): {e}')
+                              continue
               
               if not news_list:
-                  print('❌ 未提取到有效新闻数据')
-                  # 打印前几个行的结构
-                  print('前3行结构:')
-                  for i, row in enumerate(rows[:3]):
-                      print(f'行 {i}: {row}')
+                  print('❌ 未能提取任何新闻数据')
+                  print('页面结构片段:')
+                  # 打印前500个字符来诊断
+                  print(html_content[:500])
                   sys.exit(1)
               
-              print(f'✅ 成功提取 {len(news_list)} 条新闻')
+              print(f'🎉 成功提取 {len(news_list)} 条新闻')
               
           except Exception as e:
               print(f'❌ 解析失败: {str(e)}')
@@ -160,18 +190,22 @@ jobs:
               html_output += f'''
                           </tbody>
                       </table>
-                      <p class="source">数据来源：tophub.today/c/news | 更新时间：{now.strftime('%Y-%m-%d %H:%M:%S')}</p>
+                      <p class="source">数据来源：tophub.today/c/news | 更新时间：{now.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+                      <p class="source">共抓取 {len(news_list)} 条新闻</p>
                   </div>
               </body>
               </html>
               '''
               
-              # 保存HTML
               output_file = f'news/{year}/{month}/{date_str}.html'
               with open(output_file, 'w', encoding='utf-8') as f:
                   f.write(html_output)
               
-              print(f'✅ 新闻HTML已生成: {output_file}')
+              print(f'✅ HTML生成成功: {output_file}')
+              
+              # 打印文件大小
+              file_size = os.path.getsize(output_file)
+              print(f'📦 文件大小: {file_size} 字节')
               
           except Exception as e:
               print(f'❌ 生成HTML失败: {str(e)}')
@@ -182,10 +216,16 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
+          # 检查git状态
+          echo "Git状态:"
+          git status
+          
           if [[ -n $(git status -s) ]]; then
             git add news/
             git commit -m "📰 添加 $(date +%Y-%m-%d) 新闻"
+            echo "📝 提交成功"
             git push
+            echo "✅ 推送成功"
           else
             echo "⚠️ 没有新文件需要提交"
           fi
